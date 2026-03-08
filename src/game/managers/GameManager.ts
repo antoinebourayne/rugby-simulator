@@ -25,13 +25,14 @@ export class GameManager {
   // --- ballon ---
   private ballCarrierId: number | null = null;
   private ballPosition: Position = { x: 0, y: 0 };
-  /** Quand le ballon est en vol (passe), ces champs sont renseignés */
+  /** Quand le ballon est en vol (passe ou coup de pied), ces champs sont renseignés */
   private ballInFlight: {
     from: Position;
     to: Position;
     progress: number;       // 0→1
     speed: number;          // pixels / seconde
     passerId: number;
+    isKick: boolean;        // true = coup de pied, non interceptable en vol
   } | null = null;
 
   // --- callbacks vers la scène ---
@@ -46,10 +47,13 @@ export class GameManager {
   private static readonly PASS_SPEED = 500;
   /** Distance max d'une passe en px */
   private static readonly MAX_PASS_DISTANCE = 250;
+  /** Distance max d'un coup de pied en px (3× la passe) */
+  private static readonly MAX_KICK_DISTANCE = 300;
   /** Rayon de plaquage en px */
   private static readonly TACKLE_RADIUS = 15;
   /** Rayon d'interception/réception du ballon en vol */
   private static readonly CATCH_RADIUS = 40;
+
 
   constructor(fieldConfig: FieldConfig) {
     this.fieldConfig = fieldConfig;
@@ -78,12 +82,12 @@ export class GameManager {
     this.ballInFlight = null;
 
     levelData.attackPlayers.forEach(p => {
-      this.attackPlayers.set(p.id, { ...p });
+      this.attackPlayers.set(p.id, { ...p, position: { ...p.position }, stats: { ...p.stats } });
       if (p.hasBall) this.ballCarrierId = p.id;
     });
 
     levelData.defensePlayers.forEach(p => {
-      this.defensePlayers.set(p.id, { ...p });
+      this.defensePlayers.set(p.id, { ...p, position: { ...p.position }, stats: { ...p.stats } });
     });
 
     this.ballPosition = { ...levelData.ballPosition };
@@ -178,6 +182,9 @@ export class GameManager {
   // =====================================================================
 
   private moveAttackPlayers(dt: number): void {
+    // Ligne de hors-jeu : exactement au niveau du porteur du ballon
+    const offsideLine = this.ballPosition.y;
+
     this.attackPlayers.forEach((player, id) => {
       const order = this.orders.get(id);
       if (!order || order.action !== PlayerAction.RUN) return;
@@ -187,7 +194,13 @@ export class GameManager {
       const dy = order.direction.y * speed * dt;
 
       player.position.x = this.clampX(player.position.x + dx);
-      player.position.y = this.clampY(player.position.y + dy);
+
+      // Un attaquant sans ballon ne peut pas dépasser la ligne de hors-jeu
+      if (player.hasBall) {
+        player.position.y = this.clampY(player.position.y + dy);
+      } else {
+        player.position.y = this.clampY(Math.max(player.position.y + dy, offsideLine));
+      }
     });
   }
 
@@ -225,23 +238,21 @@ export class GameManager {
    */
   private processPassOrders(): void {
     this.orders.forEach((order, playerId) => {
-      if (order.action !== PlayerAction.PASS) return;
+      if (order.action !== PlayerAction.PASS && order.action !== PlayerAction.KICK) return;
 
       const player = this.attackPlayers.get(playerId);
       if (!player || !player.hasBall) return;
 
-      // Récupérer la direction de RUN **précédente** du joueur avant la passe
-      // On la cherche dans l'historique d'ordres ou on utilise celle du joueur
+      const isKick = order.action === PlayerAction.KICK;
+      const maxDist = isKick ? GameManager.MAX_KICK_DISTANCE : GameManager.MAX_PASS_DISTANCE;
       const previousDirection = this.playerRunDirection.get(playerId) || { x: 0, y: -1 };
 
-      // Calculer la destination de la passe
       const from: Position = { ...player.position };
       const to: Position = {
-        x: player.position.x + order.direction.x * GameManager.MAX_PASS_DISTANCE,
-        y: player.position.y + order.direction.y * GameManager.MAX_PASS_DISTANCE
+        x: player.position.x + order.direction.x * maxDist,
+        y: player.position.y + order.direction.y * maxDist
       };
 
-      // Le joueur lâche le ballon
       player.hasBall = false;
       this.ballCarrierId = null;
 
@@ -250,10 +261,10 @@ export class GameManager {
         to,
         progress: 0,
         speed: GameManager.PASS_SPEED,
-        passerId: playerId
+        passerId: playerId,
+        isKick,
       };
 
-      // Remettre l'ordre RUN avec la direction previoussédente pour que le passeur continue dans sa direction
       this.orders.set(playerId, { action: PlayerAction.RUN, direction: previousDirection });
     });
   }
@@ -279,7 +290,8 @@ export class GameManager {
     this.ballPosition = currentPos;
 
     // Vérifier si un joueur attrape / intercepte le ballon
-    const catcher = this.findCatcher(currentPos, flight.passerId);
+    // Un coup de pied ne peut pas être intercepté en vol par les défenseurs
+    const catcher = this.findCatcher(currentPos, flight.passerId, flight.isKick);
     if (catcher) {
       console.log(`[CATCH] Joueur ${catcher.id} (${catcher.team}) a attrapé le ballon en vol`);
       this.ballInFlight = null;
@@ -307,9 +319,9 @@ export class GameManager {
 
     // Ballon arrivé à destination sans être attrapé → tombe au sol
     if (flight.progress >= 1) {
+      const wasKick = flight.isKick;
       this.ballInFlight = null;
-      // Chercher le joueur le plus proche pour ramasser
-      this.tryPickupBall();
+      this.tryPickupBall(wasKick);
     }
   }
 
@@ -317,14 +329,16 @@ export class GameManager {
    * Cherche un joueur (attaque ou défense) capable d'attraper le ballon en vol.
    * Les défenseurs ont priorité pour les interceptions.
    */
-  private findCatcher(ballPos: Position, passerId: number): PlayerData | null {
-    // Défenseurs EN PRIORITÉ pour les interceptions
-    for (const [, player] of this.defensePlayers) {
-      if (calculateDistance(player.position, ballPos) <= GameManager.CATCH_RADIUS) {
-        return player;
+  private findCatcher(ballPos: Position, passerId: number, isKick: boolean = false): PlayerData | null {
+    // Les défenseurs ne peuvent intercepter qu'une passe (pas un coup de pied en vol)
+    if (!isKick) {
+      for (const [, player] of this.defensePlayers) {
+        if (calculateDistance(player.position, ballPos) <= GameManager.CATCH_RADIUS) {
+          return player;
+        }
       }
     }
-    // Attaquants ensuite (sauf le passeur)
+    // Attaquants (sauf l'expéditeur)
     for (const [, player] of this.attackPlayers) {
       if (player.id === passerId) continue;
       if (calculateDistance(player.position, ballPos) <= GameManager.CATCH_RADIUS) {
@@ -338,7 +352,7 @@ export class GameManager {
    * Quand le ballon est au sol, le joueur le plus proche le ramasse.
    * Si c'est un défenseur → INTERCEPTION
    */
-  private tryPickupBall(): void {
+  private tryPickupBall(isKick: boolean = false): void {
     // Chercher le défenseur le plus proche
     let closestDefender: PlayerData | null = null;
     let minDistDefense = Infinity;
@@ -351,8 +365,8 @@ export class GameManager {
       }
     }
 
-    // Si un défenseur a ramassé le ballon → INTERCEPTION
-    if (closestDefender !== null) {
+    // Si un défenseur a ramassé le ballon → INTERCEPTION (sauf après un coup de pied)
+    if (closestDefender !== null && !isKick) {
       console.log(`[INTERCEPTION] Défenseur ${closestDefender.id} a ramassé le ballon au sol`);
       const defender = closestDefender;
       defender.hasBall = true;

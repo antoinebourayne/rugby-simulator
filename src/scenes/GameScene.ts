@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { Player } from '@/game/entities/Player';
 import { GameManager } from '@/game/managers/GameManager';
-import { LevelManager } from '@/game/managers/LevelManager';
+import { LevelStore } from '@/game/state/LevelStore';
 import { PlayerAction, GameState, FieldConfig } from '@/types';
 
 // ─── Constantes terrain (pixels) ────────────────────────────────────
@@ -24,7 +24,7 @@ const FIELD_CONFIG: FieldConfig = {
  */
 export class GameScene extends Phaser.Scene {
   private gameManager!: GameManager;
-  private levelManager!: LevelManager;
+  private currentLevelId: string = 'level_1';
   private players: Map<number, Player> = new Map();
 
   // UI
@@ -47,8 +47,7 @@ export class GameScene extends Phaser.Scene {
 
   create(data: any): void {
     this.gameManager = new GameManager(FIELD_CONFIG);
-    this.levelManager = new LevelManager();
-    this.levelManager.loadFromStorage();
+    this.currentLevelId = data?.levelId ?? 'level_1';
 
     // Callbacks événements de jeu
     this.gameManager.setOnTryScoreCallback(() => this.handleTryScore());
@@ -58,17 +57,8 @@ export class GameScene extends Phaser.Scene {
     // Dessiner le terrain
     this.createField();
 
-    // Charger le niveau sélectionné ou niveau 1 par défaut
-    let level;
-    const levelId = data?.levelId;
-
-    if (levelId === 'level_1') {
-      level = this.levelManager.createLevel1();
-    } else {
-      // Par défaut, charger le niveau 1
-      level = this.levelManager.createLevel1();
-    }
-
+    // Charger le niveau depuis le store (fallback niveau 1)
+    const level = LevelStore.getById(this.currentLevelId) ?? LevelStore.getById('level_1')!;
     this.gameManager.initializeLevel(level);
 
     // Créer les sprites joueurs + ballon
@@ -145,6 +135,7 @@ export class GameScene extends Phaser.Scene {
     const pos = this.gameManager.getBallPosition();
     this.ballSprite = this.add.circle(pos.x, pos.y, 6, 0xffa500);
     this.ballSprite.setStrokeStyle(2, 0x000000);
+    this.ballSprite.setDepth(1); // sous les joueurs (depth 2)
   }
 
   /**
@@ -155,7 +146,9 @@ export class GameScene extends Phaser.Scene {
     this.gameManager.getAttackPlayers().forEach((data, id) => {
       const sprite = this.players.get(id);
       if (sprite) {
+        const moved = Math.abs(data.position.x - sprite.x) > 0.5 || Math.abs(data.position.y - sprite.y) > 0.5;
         sprite.setPosition(data.position.x, data.position.y);
+        sprite.updateMovement(moved);
         sprite.setBall(data.hasBall);
       }
     });
@@ -164,7 +157,9 @@ export class GameScene extends Phaser.Scene {
     this.gameManager.getDefensePlayers().forEach((data, id) => {
       const sprite = this.players.get(id);
       if (sprite) {
+        const moved = Math.abs(data.position.x - sprite.x) > 0.5 || Math.abs(data.position.y - sprite.y) > 0.5;
         sprite.setPosition(data.position.x, data.position.y);
+        sprite.updateMovement(moved);
         sprite.setBall(data.hasBall);
       }
     });
@@ -231,10 +226,12 @@ export class GameScene extends Phaser.Scene {
         this.gameManager.pause();
         this.clearSelection();
         this.updateStatusText();
+        this.players.forEach(p => p.anims.pause());
       } else if (state === GameState.PAUSED) {
         this.clearSelection();
         this.gameManager.resume();
         this.updateStatusText();
+        this.players.forEach(p => p.anims.resume());
       }
     });
 
@@ -282,7 +279,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ---- variables partagées pour le menu flèche ----
-  private arrowActive: 'run' | 'pass' | null = null;
+  private arrowActive: 'run' | 'pass' | 'kick' | null = null;
   private arrowAngle: number = 0;
   private arrowCenterX: number = 0;
   private arrowCenterY: number = 0;
@@ -313,7 +310,7 @@ export class GameScene extends Phaser.Scene {
 
     this.orderMenuContainer.add([runBtn, runIcon]);
 
-    // ---- Bouton « Passe » (seulement si porteur) ----
+    // ---- Bouton « Passe » + « Coup de pied » (seulement si porteur) ----
     if (hasBall) {
       const passBtn = this.add.circle(px + 50, py + 50, 20, 0xaa4444, 0.85)
         .setStrokeStyle(2, 0xffffff)
@@ -321,7 +318,13 @@ export class GameScene extends Phaser.Scene {
       const passIcon = this.add.text(px + 50, py + 50, '🤚', { fontSize: '22px', color: '#fff' }).setOrigin(0.5);
       passBtn.on('pointerdown', () => this.activateArrow('pass', px, py));
 
-      this.orderMenuContainer.add([passBtn, passIcon]);
+      const kickBtn = this.add.circle(px + 50, py + 100, 20, 0x44aa44, 0.85)
+        .setStrokeStyle(2, 0xffffff)
+        .setInteractive();
+      const kickIcon = this.add.text(px + 50, py + 100, '🦶', { fontSize: '20px', color: '#fff' }).setOrigin(0.5);
+      kickBtn.on('pointerdown', () => this.activateArrow('kick', px, py));
+
+      this.orderMenuContainer.add([passBtn, passIcon, kickBtn, kickIcon]);
     }
 
     // ---- Flèche (pointe uniquement, cachée par défaut) ----
@@ -330,13 +333,13 @@ export class GameScene extends Phaser.Scene {
     this.orderMenuContainer.add([this.arrowHead]);
   }
 
-  private activateArrow(mode: 'run' | 'pass', cx: number, cy: number): void {
+  private activateArrow(mode: 'run' | 'pass' | 'kick', cx: number, cy: number): void {
     this.arrowActive = mode;
     this.arrowCenterX = cx;
     this.arrowCenterY = cy;
     this.arrowHead.setAlpha(1);
 
-    const color = mode === 'run' ? 0xffaa00 : 0xff4444;
+    const color = mode === 'run' ? 0xffaa00 : mode === 'pass' ? 0xff4444 : 0x44cc44;
     this.arrowHead.setFillStyle(color);
 
     // Ignorer le clic immédiat qui a déclenché l'activation
@@ -351,20 +354,17 @@ export class GameScene extends Phaser.Scene {
 
     const dist = 80;
 
-    // Pour les passes, contraindre la direction vers le bas (Y positif)
-    // Cela empêche mécaniquement les passes en avant
     if (this.arrowActive === 'pass') {
+      // Passe : contrainte vers l'arrière (dy >= 0)
       const dy = pointer.y - this.arrowCenterY;
-
-      // Si la souris est au-dessus du centre, la forcer vers le bas
-      let adjustedY = pointer.y;
-      if (dy < 0) {
-        adjustedY = this.arrowCenterY; // Au minimum au même niveau
-      }
-
+      const adjustedY = dy < 0 ? this.arrowCenterY : pointer.y;
+      this.arrowAngle = Phaser.Math.Angle.Between(this.arrowCenterX, this.arrowCenterY, pointer.x, adjustedY);
+    } else if (this.arrowActive === 'kick') {
+      // Coup de pied : contrainte vers l'avant (dy <= 0)
+      const dy = pointer.y - this.arrowCenterY;
+      const adjustedY = dy > 0 ? this.arrowCenterY : pointer.y;
       this.arrowAngle = Phaser.Math.Angle.Between(this.arrowCenterX, this.arrowCenterY, pointer.x, adjustedY);
     } else {
-      // Pour la course, utiliser l'angle normal
       this.arrowAngle = Phaser.Math.Angle.Between(this.arrowCenterX, this.arrowCenterY, pointer.x, pointer.y);
     }
 
@@ -399,9 +399,14 @@ export class GameScene extends Phaser.Scene {
         action: PlayerAction.RUN,
         direction: { x: dirX, y: dirY }
       });
-    } else {
+    } else if (this.arrowActive === 'pass') {
       this.gameManager.setOrder(this.selectedPlayerId, {
         action: PlayerAction.PASS,
+        direction: { x: dirX, y: dirY }
+      });
+    } else {
+      this.gameManager.setOrder(this.selectedPlayerId, {
+        action: PlayerAction.KICK,
         direction: { x: dirX, y: dirY }
       });
     }
@@ -463,7 +468,7 @@ export class GameScene extends Phaser.Scene {
       this.ballSprite.destroy();
     }
 
-    const level = this.levelManager.createExampleLevel();
+    const level = LevelStore.getById(this.currentLevelId) ?? LevelStore.getById('level_1')!;
     this.gameManager.initializeLevel(level);
 
     this.createPlayers();

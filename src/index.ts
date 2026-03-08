@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { PreloadScene } from './scenes/PreloadScene';
 import { GameScene } from './scenes/GameScene';
 import { MenuScene } from './scenes/MenuScene';
 import { LevelSelectionScene } from './scenes/LevelSelectionScene';
@@ -20,7 +21,7 @@ const config: Phaser.Types.Core.GameConfig = {
       gravity: { x: 0, y: 0 }
     }
   },
-  scene: [MenuScene, LevelSelectionScene, GameScene, LevelEditorScene]
+  scene: [PreloadScene, MenuScene, LevelSelectionScene, GameScene, LevelEditorScene]
 };
 
 /**

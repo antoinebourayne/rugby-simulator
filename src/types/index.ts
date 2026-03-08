@@ -32,6 +32,7 @@ export interface PlayerStats {
 export enum PlayerAction {
   RUN = 'run',            // Courir dans une direction
   PASS = 'pass',          // Passer le ballon dans une direction
+  KICK = 'kick',          // Coup de pied vers l'avant (non interceptable)
 }
 
 /**

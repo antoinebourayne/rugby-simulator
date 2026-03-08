@@ -13,13 +13,21 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "type-check": "tsc --noEmit"
   },
-  "keywords": ["rugby", "simulator", "phaser", "typescript", "game", "tactical"],
+  "keywords": [
+    "rugby",
+    "simulator",
+    "phaser",
+    "typescript",
+    "game",
+    "tactical"
+  ],
   "author": "Antoine Bourayne",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
+    "copy-webpack-plugin": "^14.0.0",
     "css-loader": "^6.8.1",
     "eslint": "^8.54.0",
     "html-webpack-plugin": "^5.5.0",

@@ -1,59 +1,101 @@
 import Phaser from 'phaser';
 import { Position, Team, PlayerData } from '@/types';
 
-/**
- * Représentation visuelle d'un joueur de rugby.
- *
- * En mode live le déplacement est piloté chaque frame par GameScene
- * qui appelle directement setPosition() — plus besoin de tweens.
- */
-export class Player extends Phaser.GameObjects.Rectangle {
+// Taille du sprite d'attaque (largeur affichée en pixels)
+const ATTACK_DISPLAY_WIDTH = 55;
+const SPRITE_FRAME_WIDTH = 1024;
+const ATTACK_SCALE = ATTACK_DISPLAY_WIDTH / SPRITE_FRAME_WIDTH;
+
+// Taille du sprite de défense (largeur affichée en pixels)
+const DEFENSE_DISPLAY_WIDTH = 40;
+const DEFENSE_FRAME_WIDTH = 192;
+const DEFENSE_SCALE = DEFENSE_DISPLAY_WIDTH / DEFENSE_FRAME_WIDTH;
+
+export class Player extends Phaser.GameObjects.Sprite {
   private playerData: PlayerData;
   private isSelected: boolean = false;
-  private originalColor: number;
+  private isAttack: boolean;
+  private ballTriangle: Phaser.GameObjects.Triangle;
 
   constructor(scene: Phaser.Scene, data: PlayerData) {
-    const color = data.team === Team.ATTACK ? 0x3366cc : 0xcc3366;
-    super(scene, data.position.x, data.position.y, 20, 30, color);
+    const isAttack = data.team === Team.ATTACK;
+
+    super(scene, data.position.x, data.position.y, isAttack ? 'player' : 'defense', 0);
 
     this.playerData = { ...data };
-    this.originalColor = color;
+    this.isAttack = isAttack;
+
+    if (isAttack) {
+      this.setScale(ATTACK_SCALE);
+      const runAnim = scene.anims.get('player_run');
+      if (runAnim && runAnim.frames.length > 0) {
+        this.play('player_run');
+      }
+    } else {
+      this.setScale(DEFENSE_SCALE);
+      const defAnim = scene.anims.get('defense_run');
+      if (defAnim && defAnim.frames.length > 0) {
+        this.play('defense_run');
+      }
+    }
+
+    // Les joueurs sont au-dessus du ballon (depth 2)
+    this.setDepth(2);
+
+    // Triangle blanc au-dessus de la tête pour indiquer le porteur du ballon
+    const headOffset = isAttack ? 53 : 35;
+    this.ballTriangle = scene.add.triangle(
+      data.position.x, data.position.y - headOffset,
+      0, 8, -7, -6, 7, -6,
+      0xffffff
+    );
+    this.ballTriangle.setDepth(3);
+    this.ballTriangle.setVisible(false);
 
     this.setInteractive();
     this.setupEvents();
-
     scene.add.existing(this);
   }
 
-  // ---- Événements souris ----
-
   private setupEvents(): void {
-    this.on('pointerdown', this.onPlayerClick, this);
-    this.on('pointerover', this.onPlayerHover, this);
-    this.on('pointerout', this.onPlayerOut, this);
+    this.on('pointerover', () => this.setTint(0xffffff));
+    this.on('pointerout', () => {
+      if (this.isSelected) return;
+      this.clearTint();
+    });
+    this.on('pointerdown', () => {
+      if (this.isAttack) {
+        this.scene.events.emit('playerSelected', this.playerData.id);
+      }
+    });
   }
-
-  private onPlayerClick(): void {
-    if (this.playerData.team === Team.ATTACK) {
-      this.scene.events.emit('playerSelected', this.playerData.id);
-    }
-  }
-
-  private onPlayerHover(): void {
-    this.setFillStyle(0xffffff);
-  }
-
-  private onPlayerOut(): void {
-    if (!this.isSelected) {
-      this.setFillStyle(this.originalColor);
-    }
-  }
-
-  // ---- API publique ----
 
   public setSelected(selected: boolean): void {
     this.isSelected = selected;
-    this.setFillStyle(selected ? 0xffff00 : this.originalColor);
+    if (selected) {
+      this.setTint(0xffff00);
+    } else {
+      this.clearTint();
+    }
+  }
+
+  public updateMovement(isMoving: boolean): void {
+    const animKey = this.isAttack ? 'player_run' : 'defense_run';
+    if (isMoving) {
+      if (!this.anims.isPlaying) {
+        this.play(animKey);
+      }
+    } else {
+      if (this.anims.isPlaying) {
+        this.anims.stop();
+        this.setFrame(0);
+      }
+    }
+  }
+
+  public setBall(hasBall: boolean): void {
+    this.playerData.hasBall = hasBall;
+    this.ballTriangle.setVisible(hasBall);
   }
 
   public updateData(data: Partial<PlayerData>): void {
@@ -72,13 +114,13 @@ export class Player extends Phaser.GameObjects.Rectangle {
     return this.playerData.hasBall;
   }
 
-  public setBall(hasBall: boolean): void {
-    this.playerData.hasBall = hasBall;
-    if (hasBall) {
-      this.setStrokeStyle(3, 0xffaa00);
-    } else {
-      this.setStrokeStyle(0);
+  public setPosition(x: number, y: number): this {
+    super.setPosition(x, y);
+    if (this.ballTriangle) {
+      const headOffset = this.isAttack ? 53 : 35;
+      this.ballTriangle.setPosition(x, y - headOffset);
     }
+    return this;
   }
 
   public getPosition(): Position {
@@ -89,5 +131,10 @@ export class Player extends Phaser.GameObjects.Rectangle {
     const dx = this.x - position.x;
     const dy = this.y - position.y;
     return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  public destroy(fromScene?: boolean): void {
+    this.ballTriangle?.destroy();
+    super.destroy(fromScene);
   }
 }
